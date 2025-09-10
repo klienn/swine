@@ -8,8 +8,8 @@
   },
   "tasks": {
     "predeploy": "deno run -A scripts/sync_shared.ts",
-    "deploy:all": "deno task predeploy && npx supabase@latest functions deploy ingest-live-frame ingest-snapshot live-current config alerts-create camera-heartbeat retention-cleanup --project-ref bxfpksbyhpjfaioubrds --use-api",
-    "deploy:snapshot": "deno task predeploy && npx supabase@latest functions deploy ingest-snapshot --project-ref bxfpksbyhpjfaioubrds --use-api",
+    "deploy:all": "deno task predeploy && npx supabase@latest functions deploy ingest-live-frame ingest-snapshot live-current config alerts-create camera-heartbeat retention-cleanup --project-ref tqhbmujdtqxqivaesydq --use-api",
+    "deploy:snapshot": "deno task predeploy && npx supabase@latest functions deploy ingest-snapshot --project-ref tqhbmujdtqxqivaesydq --use-api",
     "serve:snapshot": "deno task predeploy && npx supabase@latest functions serve ingest-snapshot --no-verify-jwt"
   }
 }
