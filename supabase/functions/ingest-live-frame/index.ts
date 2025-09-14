@@ -58,7 +58,7 @@ Deno.serve(async (req) => {
     let overlayWarning: string | null = null;
 
     const skipOverlay = (Deno.env.get("SKIP_OVERLAY") ?? "") === "1";
-    console.log(`overlay: skip=${skipOverlay}`);
+    console.log(`overlay: skip=${skipOverlay},  SKIP_OVERLAY = ${Deno.env.get("SKIP_OVERLAY")})`);
     if (!skipOverlay) {
       try {
         const W = Number((thermal as any)?.w);
