@@ -124,20 +124,10 @@ Deno.serve(async (req) => {
       .eq("id", auth.devId);
 
     const dt = Date.now() - t0;
-    return new Response(
-      JSON.stringify({
-        ok: true,
-        path: objectPath,
-        bytes: outBytes.byteLength,
-        readingId,
-        warning: overlayWarning,
-        took_ms: dt,
-      }),
-      { status: 200, headers: { "Content-Type": "application/json" } },
-    );
+    return new Response({ status: 200, headers: { "Content-Type": "application/json" } });
   } catch (err) {
     console.error("ingest-live-frame fatal:", err);
-    return new Response(JSON.stringify({ error: "server_error", details: String(err) }), {
+    return new Response({
       status: 500,
       headers: { "Content-Type": "application/json" },
     });
