@@ -1,7 +1,6 @@
 // ==== SwiNetTrack — ESP32 Hub (minimal main) ====
 #include "swinetrack_http.h"
 #include "swinetrack_sensors.h"
-#include "live_frame_uploader.h"
 
 using namespace swt;  // just for brevity below
 
@@ -27,7 +26,7 @@ Adafruit_MLX90640 mlx;
 float mlxFrame[32 * 24];
 float gasBaseline = 0;
 
-uint32_t lastReading = 0;
+uint32_t lastLive = 0, lastReading = 0;
 
 void setup() {
   Serial.begin(115200);
@@ -55,8 +54,6 @@ void setup() {
   swt::fetchConfig(FN_BASE, DEVICE_ID, DEVICE_SECRET,
                    CAMERA_URL, LIVE_FRAME_INTERVAL_MS, READING_INTERVAL_MS,
                    OVERLAY_ALPHA, FEVER_C);
-
-  startLiveFrameUploader(CAMERA_URL, FN_BASE, DEVICE_ID, DEVICE_SECRET, LIVE_FRAME_INTERVAL_MS);
 
   // (Optional) quick health check to the same domain
   // swt::postPing(FN_BASE);
@@ -96,6 +93,49 @@ void loop() {
       _tmp = String();                                            // free temp String
       lastReading = now;
     }
+  }
+
+  // --- camera fetch backoff on failures ---
+  static uint8_t camFailCount = 0;
+  static uint32_t camBackoffUntil = 0;
+  if (camBackoffUntil && now < camBackoffUntil) {
+    // Skip work while backing off
+    delay(20);
+    return;
+  }
+
+  // --- near-live frame push (overwrite) ---
+  if (now - lastLive >= LIVE_FRAME_INTERVAL_MS) {
+    std::vector<uint8_t> jpeg;
+    if (swt::fetchCamera(CAMERA_URL, jpeg)) {
+      // success: reset backoff
+      camFailCount = 0;
+      camBackoffUntil = 0;
+
+      // refresh thermal right before upload
+      readMLX90640(mlx, mlxFrame);
+      String thJson = makeThermalJson(mlxFrame, tMin, tMax, tAvg);
+      String rdJson = makeReadingJson(lastTemp, lastHum, lastPress, lastGas, /*iaq*/ lastIAQ, tMin, tMax, tAvg);
+
+      bool ok = swt::postMultipart(FN_BASE, DEVICE_ID, DEVICE_SECRET,
+                                   "/ingest-live-frame", jpeg, thJson, rdJson);
+      if (!ok) {
+        Serial.println("live-frame upload failed");
+        // treat like a failure to slow down a bit
+        camFailCount = min<uint8_t>(camFailCount + 1, 6);
+        camBackoffUntil = now + (1000UL << camFailCount);  // 1s,2s,4s,...64s
+      }
+
+      // free big buffers asap
+      std::vector<uint8_t>().swap(jpeg);
+      thJson = String();
+      rdJson = String();
+    } else {
+      Serial.println("camera fetch failed");
+      camFailCount = min<uint8_t>(camFailCount + 1, 6);
+      camBackoffUntil = now + (1000UL << camFailCount);  // exponential backoff
+    }
+    lastLive = now;
   }
 
   // --- simple alert heuristic with cooldown ---
