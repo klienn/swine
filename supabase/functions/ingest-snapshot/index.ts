@@ -1,6 +1,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2?dts";
 import { verify } from "./_auth.ts"; // your HMAC verifier (SR key client)
-import { composeOverlay, type ThermalPayload } from "./_overlay.ts";
+// Overlaying is now done on the device. We persist the thermal payload for
+// client-side composition.
 
 Deno.serve(async (req) => {
   try {
@@ -51,38 +52,29 @@ Deno.serve(async (req) => {
       console.error("snapshot: reading insert failed:", e);
     }
 
-    // ---- overlay (graceful fallback to raw bytes)
-    let outBytes: Uint8Array = camBytes;
-    let contentType = "image/jpeg";
-    let overlayWarning: string | null = null;
+    // ---- no server-side overlay; save camera frame and thermal JSON
+    const contentType = "image/jpeg";
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-"); // safe filename
+    const objectPath = `${auth.devId}/${stamp}.jpg`;
+
+    const { error: upErr } = await supabase.storage
+      .from("snapshots")
+      .upload(objectPath, camBytes, {
+        contentType,
+        upsert: false,
+        cacheControl: "no-store",
+      });
 
     if (thermalFile) {
-      try {
-        const thermal = JSON.parse(await thermalFile.text()) as ThermalPayload;
-        const alpha = Number(Deno.env.get("OVERLAY_ALPHA") ?? "0.35");
-        outBytes = await composeOverlay(camBytes, thermal, alpha);
-        // PNG signature? (ImageScript may fall back)
-        if (outBytes.length >= 8 && outBytes[0] === 0x89 && outBytes[1] === 0x50) {
-          contentType = "image/png";
-        }
-      } catch (e) {
-        overlayWarning = String(e?.message ?? e);
-        console.error("snapshot: composeOverlay failed:", overlayWarning);
-        outBytes = camBytes; // use raw frame
-        contentType = "image/jpeg";
-      }
+      const thermalJson = await thermalFile.text();
+      await supabase.storage
+        .from("snapshots")
+        .upload(`${auth.devId}/${stamp}.json`, thermalJson, {
+          contentType: "application/json",
+          upsert: false,
+          cacheControl: "no-store",
+        });
     }
-
-    // ---- upload into Storage bucket 'snapshots' (append-only)
-    const stamp = new Date().toISOString().replace(/[:.]/g, "-"); // safe filename
-    const ext = contentType === "image/png" ? "png" : "jpg";
-    const objectPath = `${auth.devId}/${stamp}.${ext}`;
-
-    const { error: upErr } = await supabase.storage.from("snapshots").upload(objectPath, outBytes, {
-      contentType,
-      upsert: false,
-      cacheControl: "no-store",
-    });
 
     if (upErr) {
       console.error("snapshot: storage upload failed:", upErr);
@@ -130,7 +122,6 @@ Deno.serve(async (req) => {
         overlay_path: objectPath,
         contentType,
         readingId,
-        warning: overlayWarning,
       }),
       { status: 200, headers: { "Content-Type": "application/json" } },
     );
