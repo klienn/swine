@@ -1,7 +1,8 @@
 // supabase/functions/ingest-live-frame/index.ts
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2?dts";
 import { verify } from "./_auth.ts";
-import { composeOverlay, type ThermalPayload } from "./_overlay.ts";
+// Overlay is now handled on the device. We only persist the raw thermal
+// payload so that the frontend can render it.
 
 Deno.serve(async (req) => {
   const t0 = Date.now();
@@ -24,7 +25,9 @@ Deno.serve(async (req) => {
     }
 
     const camBytes = new Uint8Array(await cam.arrayBuffer());
-    const thermal = JSON.parse(await thermalFile.text()) as ThermalPayload;
+    // keep the raw thermal payload so the mobile app can compose the overlay
+    // client-side. We don't parse it here since no server-side overlay occurs.
+    const thermalJson = await thermalFile.text();
 
     // optional reading (never fail the request if insert errors)
     let readingId: number | null = null;
@@ -52,59 +55,24 @@ Deno.serve(async (req) => {
       }
     }
 
-    // overlay (guarded + skippable)
-    let outBytes = camBytes;
-    let contentType = "image/jpeg";
-    let overlayWarning: string | null = null;
-
-    const skipOverlay = (Deno.env.get("SKIP_OVERLAY") ?? "") === "1";
-    console.log(`overlay: skip=${skipOverlay},  SKIP_OVERLAY = ${Deno.env.get("SKIP_OVERLAY")})`);
-    if (!skipOverlay) {
-      try {
-        const W = Number((thermal as any)?.w);
-        const H = Number((thermal as any)?.h);
-        const len = Array.isArray((thermal as any)?.data) ? (thermal as any).data.length : -1;
-
-        // quick sanity checks to avoid ImageScript throwing
-        if (
-          Number.isFinite(W) &&
-          Number.isFinite(H) &&
-          W >= 2 &&
-          H >= 2 &&
-          len >= W * H &&
-          camBytes.byteLength > 0
-        ) {
-          const t1 = Date.now();
-          const alpha = Number(Deno.env.get("OVERLAY_ALPHA") ?? "0.35");
-          const composed = await composeOverlay(camBytes, thermal, alpha);
-          const t2 = Date.now();
-
-          outBytes = composed;
-          if (outBytes.length >= 8 && outBytes[0] === 0x89 && outBytes[1] === 0x50) {
-            contentType = "image/png";
-          } // else JPEG
-
-          console.log(`overlay ok: cam=${camBytes.length}B, W×H=${W}×${H}, took=${t2 - t1}ms`);
-        } else {
-          overlayWarning = `overlay_skipped_bad_meta w=${W} h=${H} len=${len}`;
-          console.warn(overlayWarning);
-        }
-      } catch (e) {
-        overlayWarning = `composeOverlay failed: ${String((e as Error)?.message ?? e)}`;
-        console.error(overlayWarning);
-        outBytes = camBytes;
-        contentType = "image/jpeg";
-      }
-    } else {
-      overlayWarning = "overlay_skipped_env";
-    }
-
-    // upload to frames-live/current.jpg|png
-    const objectPath = `${auth.devId}/current.${contentType === "image/png" ? "png" : "jpg"}`;
+    // No server-side overlay; simply persist the raw camera frame
+    // (assumed JPEG) and the raw thermal JSON so the client can overlay.
+    const contentType = "image/jpeg";
+    const framePath = `${auth.devId}/current.jpg`;
     const { error: upErr } = await supabase.storage
       .from("frames-live")
-      .upload(objectPath, outBytes, {
+      .upload(framePath, camBytes, {
         contentType,
+        upsert: true,
+        cacheControl: "no-store",
+      });
+
+    // Persist thermal JSON alongside the frame for client use
+    const thermalPath = `${auth.devId}/current.json`;
+    await supabase.storage
+      .from("frames-live")
+      .upload(thermalPath, thermalJson, {
+        contentType: "application/json",
         upsert: true,
         cacheControl: "no-store",
       });
@@ -124,12 +92,15 @@ Deno.serve(async (req) => {
       .eq("id", auth.devId);
 
     const dt = Date.now() - t0;
-    return new Response({ status: 200, headers: { "Content-Type": "application/json" } });
+    return new Response(
+      JSON.stringify({ ok: true, readingId, elapsed_ms: dt }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
   } catch (err) {
     console.error("ingest-live-frame fatal:", err);
-    return new Response({
-      status: 500,
-      headers: { "Content-Type": "application/json" },
-    });
+    return new Response(
+      JSON.stringify({ error: "server_error", details: String(err) }),
+      { status: 500, headers: { "Content-Type": "application/json" } },
+    );
   }
 });

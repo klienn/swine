@@ -17,10 +17,11 @@
 
 ### 1. Live
 
-Each device continuously overwrites:
+Each device continuously overwrites two objects used by the mobile app:
 
 ```
-frames-live/<device_id>/current.jpg (or .png)
+frames-live/<device_id>/current.jpg   // raw camera frame
+frames-live/<device_id>/current.json  // thermal payload for overlay
 ```
 
 #### API + Hook
@@ -108,6 +109,13 @@ Database table:
 
 ```
 snapshots(device_id, ts, overlay_path, reading_id, alert_id)
+```
+
+Each snapshot uploads two files to the `snapshots` bucket:
+
+```
+snapshots/<device_id>/<stamp>.jpg   // raw frame referenced by overlay_path
+snapshots/<device_id>/<stamp>.json  // thermal payload for client overlay
 ```
 
 #### API
