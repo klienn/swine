@@ -1,23 +1,9 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2?dts";
 import { verify } from "./_auth.ts"; // your HMAC verifier (SR key client)
-// Overlaying is now done on the device. We persist the thermal payload for
-// client-side composition.
-
-const encoder = new TextEncoder();
-
-const toHex = (buf: ArrayBufferLike) =>
-  Array.from(new Uint8Array(buf))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
+import { createAlert, AlertDraft } from "./create-alert.ts";
 
 const numberOrNull = (value: unknown) =>
   typeof value === "number" && Number.isFinite(value) ? value : null;
-
-type AlertDraft = {
-  kind: string;
-  severity: string;
-  message: string;
-};
 
 const normalizeFlag = (flag: unknown) => {
   if (typeof flag !== "string") return null;
@@ -108,70 +94,12 @@ const buildAlertsFromReading = (reading: Record<string, unknown>): AlertDraft[] 
   return alertDrafts;
 };
 
-const invokeAlertsCreate = async (
-  deviceId: string,
-  deviceSecret: string,
-  alert: AlertDraft,
-  readingId: number | null,
-) => {
-  const supabaseUrl = Deno.env.get("SUPABASE_URL");
-  if (!supabaseUrl) throw new Error("SUPABASE_URL is not configured");
-  const url = new URL("/functions/v1/alerts-create", supabaseUrl);
-  const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-  if (!serviceKey) {
-    throw new Error("SUPABASE_SERVICE_ROLE_KEY is not configured");
-  }
-  const body: Record<string, unknown> = {
-    kind: alert.kind,
-    severity: alert.severity,
-    message: alert.message,
-  };
-  if (readingId != null) body.reading_id = readingId;
-  const bodyJson = JSON.stringify(body);
-  const timestamp = Date.now().toString();
-  const bodyHash = await crypto.subtle.digest("SHA-256", encoder.encode(bodyJson));
-  const signatureBase = `POST\n${url.pathname}\n${toHex(bodyHash)}\n${timestamp}`;
-  const key = await crypto.subtle.importKey(
-    "raw",
-    encoder.encode(deviceSecret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const signature = toHex(await crypto.subtle.sign("HMAC", key, encoder.encode(signatureBase)));
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Device-Id": deviceId,
-      "X-Timestamp": timestamp,
-      "X-Signature": signature,
-      Authorization: `Bearer ${serviceKey}`,
-      apikey: serviceKey,
-    },
-    body: bodyJson,
-  });
-  if (!response.ok) {
-    const errorText = await response.text().catch(() => "");
-    throw new Error(`alerts-create failed (${response.status}): ${errorText}`);
-  }
-  const payload = (await response.json().catch(() => null)) as { id?: number } | null;
-  if (!payload || typeof payload.id !== "number") {
-    throw new Error("alerts-create returned an unexpected response");
-  }
-  return payload.id;
-};
-
 Deno.serve(async (req) => {
   try {
     const auth = await verify(req);
     if (!auth.ok) return new Response(auth.msg, { status: auth.status });
 
     const supabase = auth.supabase as ReturnType<typeof createClient>;
-    const deviceSecret =
-      typeof (auth as { deviceSecret?: unknown }).deviceSecret === "string"
-        ? (auth as { deviceSecret: string }).deviceSecret
-        : "";
     const form = await req.clone().formData();
 
     const cam = form.get("cam") as File | null;
@@ -287,10 +215,10 @@ Deno.serve(async (req) => {
       console.error("snapshot: table insert threw:", e);
     }
 
-    if (alertsToCreate.length > 0 && deviceSecret) {
+    if (alertsToCreate.length) {
       for (const alert of alertsToCreate) {
         try {
-          const alertId = await invokeAlertsCreate(auth.devId, deviceSecret, alert, readingId);
+          const alertId = await createAlert(supabase, auth.devId, alert, readingId);
           createdAlertIds.push(alertId);
         } catch (err) {
           console.error("snapshot: alert creation failed:", err);
@@ -306,9 +234,6 @@ Deno.serve(async (req) => {
           console.error("snapshot: failed to link alert to snapshot:", err);
         }
       }
-    }
-    if (alertsToCreate.length > 0 && !deviceSecret) {
-      console.warn("snapshot: device secret missing; unable to create alerts");
     }
 
     // ---- touch devices.last_seen (best effort)
