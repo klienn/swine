@@ -128,19 +128,24 @@ void loop() {
   // --- alert snapshot (full thermal grid), with cooldown ---
   static uint32_t alertCooldownUntil = 0;
   const bool airQualityElevated = isAirQualityElevated(lastGas, gasBaseline);
-  const bool feverDetected = tMax > FEVER_C;
-  if ((now >= alertCooldownUntil) && (airQualityElevated || feverDetected)) {
+  const bool feverAtTrigger = tMax > FEVER_C;
+  if ((now >= alertCooldownUntil) && (airQualityElevated || feverAtTrigger)) {
     std::vector<uint8_t> jpeg;
     if (swt::fetchCamera(CAMERA_URL, jpeg)) {
       readMLX90640(mlx, mlxFrame);
       float _tMin, _tMax, _tAvg;
       String thJson = makeThermalJson(mlxFrame, _tMin, _tMax, _tAvg);
-      String rdJson = makeReadingJson(lastTemp, lastHum, lastPress, lastGas, lastIAQ, _tMin, _tMax, _tAvg);
-
-      const char* triggerReason =
-        airQualityElevated && feverDetected ? "air+fever" : airQualityElevated ? "air"
-                                                          : feverDetected      ? "fever"
-                                                                               : "unknown";
+      const bool feverNow = _tMax > FEVER_C;
+      const bool feverObserved = feverAtTrigger || feverNow;
+      const char* triggerReason = airQualityElevated && feverObserved
+                                    ? "air+fever"
+                                  : airQualityElevated ? "air"
+                                  : feverObserved      ? "fever"
+                                                       : "unknown";
+      String rdJson = makeAlertContextJson(lastTemp, lastHum, lastPress, lastGas, lastIAQ,
+                                           _tMin, _tMax, _tAvg, tMax, gasBaseline, FEVER_C,
+                                           airQualityElevated, feverNow, feverAtTrigger,
+                                           triggerReason, lastReading, swt::nowMs(), now);
       if (uploader.enqueuePriority("/ingest-snapshot", std::move(jpeg), thJson, rdJson)) {
         Serial.printf("[loop] snapshot queued (alert priority, reason=%s, gas=%.2f baseline=%.2f, prevMax=%.2f thresh=%.1f, newMax=%.2f)\n",
                       triggerReason, lastGas, gasBaseline, tMax, FEVER_C, _tMax);
