@@ -15,6 +15,17 @@ Deno.serve(async (req) => {
     const thermalFile = form.get("thermal") as File | null;
     const readingFile = form.get("reading") as File | null;
 
+    console.log(
+      `ingest-snapshot: dev=${auth.devId} cam=${cam?.size ?? 0}B thermal=${
+        thermalFile?.size ?? 0
+      }B reading=${readingFile?.size ?? 0}B`,
+    );
+    console.log(
+      `thermal: ${thermalFile ? await thermalFile.text() : "none"}, reading: ${
+        readingFile ? await readingFile.text() : "none"
+      }`,
+    );
+
     if (!cam) {
       return new Response(JSON.stringify({ error: "missing_cam" }), {
         status: 400,
@@ -57,23 +68,19 @@ Deno.serve(async (req) => {
     const stamp = new Date().toISOString().replace(/[:.]/g, "-"); // safe filename
     const objectPath = `${auth.devId}/${stamp}.jpg`;
 
-    const { error: upErr } = await supabase.storage
-      .from("snapshots")
-      .upload(objectPath, camBytes, {
-        contentType,
-        upsert: false,
-        cacheControl: "no-store",
-      });
+    const { error: upErr } = await supabase.storage.from("snapshots").upload(objectPath, camBytes, {
+      contentType,
+      upsert: false,
+      cacheControl: "no-store",
+    });
 
     if (thermalFile) {
       const thermalJson = await thermalFile.text();
-      await supabase.storage
-        .from("snapshots")
-        .upload(`${auth.devId}/${stamp}.json`, thermalJson, {
-          contentType: "application/json",
-          upsert: false,
-          cacheControl: "no-store",
-        });
+      await supabase.storage.from("snapshots").upload(`${auth.devId}/${stamp}.json`, thermalJson, {
+        contentType: "application/json",
+        upsert: false,
+        cacheControl: "no-store",
+      });
     }
 
     if (upErr) {

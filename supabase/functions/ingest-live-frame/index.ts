@@ -69,13 +69,11 @@ Deno.serve(async (req) => {
 
     // Persist thermal JSON alongside the frame for client use
     const thermalPath = `${auth.devId}/current.json`;
-    await supabase.storage
-      .from("frames-live")
-      .upload(thermalPath, thermalJson, {
-        contentType: "application/json",
-        upsert: true,
-        cacheControl: "no-store",
-      });
+    await supabase.storage.from("frames-live").upload(thermalPath, thermalJson, {
+      contentType: "application/json",
+      upsert: true,
+      cacheControl: "no-store",
+    });
 
     if (upErr) {
       console.error("storage upload failed:", upErr);
@@ -92,15 +90,15 @@ Deno.serve(async (req) => {
       .eq("id", auth.devId);
 
     const dt = Date.now() - t0;
-    return new Response(
-      JSON.stringify({ ok: true, readingId, elapsed_ms: dt }),
-      { status: 200, headers: { "Content-Type": "application/json" } },
-    );
+    return new Response(JSON.stringify({ ok: true, readingId, elapsed_ms: dt }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
   } catch (err) {
     console.error("ingest-live-frame fatal:", err);
-    return new Response(
-      JSON.stringify({ error: "server_error", details: String(err) }),
-      { status: 500, headers: { "Content-Type": "application/json" } },
-    );
+    return new Response(JSON.stringify({ error: "server_error", details: String(err) }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" },
+    });
   }
 });
