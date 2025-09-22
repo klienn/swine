@@ -1,8 +1,11 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
+export type AlertKind = "AIR_QUALITY" | "TEMP_FEVER" | "DEVICE_OFFLINE";
+export type AlertSeverity = "INFO" | "WARN" | "CRIT";
+
 export type AlertDraft = {
-  kind: string;
-  severity: string;
+  kind: AlertKind;
+  severity: AlertSeverity;
   message: string;
 };
 

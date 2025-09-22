@@ -1,6 +1,11 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2?dts";
 import { verify } from "./_auth.ts"; // your HMAC verifier (SR key client)
-import { createAlert, AlertDraft } from "./create-alert.ts";
+import {
+  createAlert,
+  type AlertDraft,
+  type AlertKind,
+  type AlertSeverity,
+} from "./create-alert.ts";
 
 const numberOrNull = (value: unknown) =>
   typeof value === "number" && Number.isFinite(value) ? value : null;
@@ -22,12 +27,38 @@ const friendlyReason = (reason: string) =>
     .replace(/[_-]+/g, " ")
     .trim();
 
+const mapFlagToAlertKind = (flag: string): AlertKind | null => {
+  const canonical = flag.toLowerCase();
+  if (
+    canonical.includes("fever") ||
+    canonical.includes("temp-fever") ||
+    canonical.includes("temperature")
+  ) {
+    return "TEMP_FEVER";
+  }
+  if (
+    canonical.includes("air-quality") ||
+    canonical.includes("airquality") ||
+    canonical.includes("iaq") ||
+    canonical.includes("gas")
+  ) {
+    return "AIR_QUALITY";
+  }
+  if (
+    canonical.includes("offline") ||
+    canonical.includes("disconnected") ||
+    canonical.includes("no-signal")
+  ) {
+    return "DEVICE_OFFLINE";
+  }
+  return null;
+};
+
 const alertMessageForKind = (
-  kind: string,
+  kind: AlertKind,
   reading: Record<string, unknown>,
-): { severity: string; message: string } => {
-  const canonical = kind.replace(/_/g, "-");
-  if (canonical === "fever") {
+): { severity: AlertSeverity; message: string } => {
+  if (kind === AlertKind.TEMP_FEVER) {
     const max =
       numberOrNull(reading["tMax"]) ??
       numberOrNull(reading["t_max"]) ??
@@ -42,12 +73,12 @@ const alertMessageForKind = (
     if (delta != null) parts.push(`Δ +${delta.toFixed(2)}°C`);
     const suffix = parts.length ? ` (${parts.join(", ")})` : "";
     return {
-      severity: "high",
+      severity: AlertSeverity.CRIT,
       message: `Fever detected${suffix}.`,
     };
   }
 
-  if (canonical === "air-quality") {
+  if (kind === AlertKind.AIR_QUALITY) {
     const iaq = numberOrNull(reading["iaq"]);
     const gasRatio = numberOrNull(reading["gasRatio"]);
     const metrics: string[] = [];
@@ -55,39 +86,64 @@ const alertMessageForKind = (
     if (gasRatio != null) metrics.push(`gas ratio ${gasRatio.toFixed(2)}`);
     const suffix = metrics.length ? ` (${metrics.join(", ")})` : "";
     return {
-      severity: "medium",
+      severity: AlertSeverity.WARN,
       message: `Air quality threshold exceeded${suffix}.`,
     };
   }
 
-  const rawReason = reading["triggerReason"];
-  const baseReason =
-    typeof rawReason === "string" && rawReason.trim().length > 0 ? rawReason : kind;
-  const pretty = friendlyReason(baseReason);
+  if (kind === AlertKind.DEVICE_OFFLINE) {
+    const rawReason = reading["triggerReason"];
+    const pretty =
+      typeof rawReason === "string" && rawReason.trim().length > 0
+        ? friendlyReason(rawReason)
+        : "Device offline";
+    const suffix = pretty && pretty.toLowerCase() !== "device offline" ? ` (${pretty})` : "";
+    return {
+      severity: AlertSeverity.WARN,
+      message: `Device offline detected${suffix}.`,
+    };
+  }
   return {
-    severity: "medium",
-    message: `Alert triggered (${pretty}).`,
+    severity: AlertSeverity.WARN,
+    message: `Alert triggered.`,
   };
 };
 
 const buildAlertsFromReading = (reading: Record<string, unknown>): AlertDraft[] => {
-  const flags = new Set<string>();
+  const kinds = new Set<AlertKind>();
+  const unknownFlags = new Set<string>();
+
+  const considerFlag = (flag: unknown) => {
+    const normalized = normalizeFlag(flag);
+    if (!normalized) return;
+    const kind = mapFlagToAlertKind(normalized);
+    if (kind) {
+      kinds.add(kind);
+    } else {
+      unknownFlags.add(normalized);
+    }
+  };
+
   const rawFlags = Array.isArray(reading["triggerFlags"])
     ? (reading["triggerFlags"] as unknown[])
     : [];
   for (const raw of rawFlags) {
-    const normalized = normalizeFlag(raw);
-    if (normalized) flags.add(normalized);
+    considerFlag(raw);
   }
   if (Boolean(reading["feverDetected"])) flags.add("fever");
   if (Boolean(reading["airQualityElevated"])) flags.add("air-quality");
   if (flags.size === 0) {
-    const normalizedReason = normalizeFlag(reading["triggerReason"]);
-    if (normalizedReason) flags.add(normalizedReason);
+    considerFlag(reading["triggerReason"]);
+  }
+
+  if (unknownFlags.size > 0) {
+    console.warn(
+      `snapshot: ignoring unrecognized alert flags: ${Array.from(unknownFlags).join(", ")}`,
+    );
   }
 
   const alertDrafts: AlertDraft[] = [];
-  for (const kind of flags) {
+  for (const kind of kinds) {
     const { severity, message } = alertMessageForKind(kind, reading);
     alertDrafts.push({ kind, severity, message });
   }
