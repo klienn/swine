@@ -43,14 +43,13 @@ const alertMessageForKind = (
   const canonical = kind.replace(/_/g, "-");
   if (canonical === "fever") {
     const max =
-      numberOrNull(reading["tMax"]) ?? numberOrNull(reading["t_max"]) ??
-      numberOrNull(reading["tMaxC"]) ?? numberOrNull(reading["t_max_c"]);
+      numberOrNull(reading["tMax"]) ??
+      numberOrNull(reading["t_max"]) ??
+      numberOrNull(reading["tMaxC"]) ??
+      numberOrNull(reading["t_max_c"]);
     const threshold =
-      numberOrNull(reading["feverThresholdC"]) ??
-      numberOrNull(reading["fever_threshold_c"]);
-    const delta =
-      numberOrNull(reading["feverDelta"]) ??
-      numberOrNull(reading["fever_delta"]);
+      numberOrNull(reading["feverThresholdC"]) ?? numberOrNull(reading["fever_threshold_c"]);
+    const delta = numberOrNull(reading["feverDelta"]) ?? numberOrNull(reading["fever_delta"]);
     const parts: string[] = [];
     if (max != null) parts.push(`max ${max.toFixed(2)}°C`);
     if (threshold != null) parts.push(`threshold ${threshold.toFixed(1)}°C`);
@@ -77,9 +76,7 @@ const alertMessageForKind = (
 
   const rawReason = reading["triggerReason"];
   const baseReason =
-    typeof rawReason === "string" && rawReason.trim().length > 0
-      ? rawReason
-      : kind;
+    typeof rawReason === "string" && rawReason.trim().length > 0 ? rawReason : kind;
   const pretty = friendlyReason(baseReason);
   return {
     severity: "medium",
@@ -120,6 +117,10 @@ const invokeAlertsCreate = async (
   const supabaseUrl = Deno.env.get("SUPABASE_URL");
   if (!supabaseUrl) throw new Error("SUPABASE_URL is not configured");
   const url = new URL("/functions/v1/alerts-create", supabaseUrl);
+  const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  if (!serviceKey) {
+    throw new Error("SUPABASE_SERVICE_ROLE_KEY is not configured");
+  }
   const body: Record<string, unknown> = {
     kind: alert.kind,
     severity: alert.severity,
@@ -137,9 +138,7 @@ const invokeAlertsCreate = async (
     false,
     ["sign"],
   );
-  const signature = toHex(
-    await crypto.subtle.sign("HMAC", key, encoder.encode(signatureBase)),
-  );
+  const signature = toHex(await crypto.subtle.sign("HMAC", key, encoder.encode(signatureBase)));
   const response = await fetch(url, {
     method: "POST",
     headers: {
@@ -147,6 +146,8 @@ const invokeAlertsCreate = async (
       "X-Device-Id": deviceId,
       "X-Timestamp": timestamp,
       "X-Signature": signature,
+      Authorization: `Bearer ${serviceKey}`,
+      apikey: serviceKey,
     },
     body: bodyJson,
   });
@@ -154,9 +155,7 @@ const invokeAlertsCreate = async (
     const errorText = await response.text().catch(() => "");
     throw new Error(`alerts-create failed (${response.status}): ${errorText}`);
   }
-  const payload = (await response.json().catch(() => null)) as
-    | { id?: number }
-    | null;
+  const payload = (await response.json().catch(() => null)) as { id?: number } | null;
   if (!payload || typeof payload.id !== "number") {
     throw new Error("alerts-create returned an unexpected response");
   }
@@ -187,9 +186,7 @@ Deno.serve(async (req) => {
         thermalFile?.size ?? 0
       }B reading=${readingFile?.size ?? 0}B`,
     );
-    console.log(
-      `thermal: ${thermalText ?? "none"}, reading: ${readingText ?? "none"}`,
-    );
+    console.log(`thermal: ${thermalText ?? "none"}, reading: ${readingText ?? "none"}`);
 
     let readingPayload: Record<string, unknown> | null = null;
     if (readingText) {
@@ -199,9 +196,7 @@ Deno.serve(async (req) => {
         console.error("snapshot: failed to parse reading payload:", err);
       }
     }
-    const alertsToCreate = readingPayload
-      ? buildAlertsFromReading(readingPayload)
-      : [];
+    const alertsToCreate = readingPayload ? buildAlertsFromReading(readingPayload) : [];
     const createdAlertIds: number[] = [];
 
     if (!cam) {
@@ -295,12 +290,7 @@ Deno.serve(async (req) => {
     if (alertsToCreate.length > 0 && deviceSecret) {
       for (const alert of alertsToCreate) {
         try {
-          const alertId = await invokeAlertsCreate(
-            auth.devId,
-            deviceSecret,
-            alert,
-            readingId,
-          );
+          const alertId = await invokeAlertsCreate(auth.devId, deviceSecret, alert, readingId);
           createdAlertIds.push(alertId);
         } catch (err) {
           console.error("snapshot: alert creation failed:", err);
