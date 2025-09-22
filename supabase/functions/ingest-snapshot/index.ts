@@ -112,10 +112,12 @@ const alertMessageForKind = (
 const buildAlertsFromReading = (reading: Record<string, unknown>): AlertDraft[] => {
   const kinds = new Set<AlertKind>();
   const unknownFlags = new Set<string>();
+  const flags = new Set<string>();
 
   const considerFlag = (flag: unknown) => {
     const normalized = normalizeFlag(flag);
     if (!normalized) return;
+    flags.add(normalized);
     const kind = mapFlagToAlertKind(normalized);
     if (kind) {
       kinds.add(kind);
@@ -130,8 +132,8 @@ const buildAlertsFromReading = (reading: Record<string, unknown>): AlertDraft[] 
   for (const raw of rawFlags) {
     considerFlag(raw);
   }
-  if (Boolean(reading["feverDetected"])) flags.add("fever");
-  if (Boolean(reading["airQualityElevated"])) flags.add("air-quality");
+  if (Boolean(reading["feverDetected"])) considerFlag("fever");
+  if (Boolean(reading["airQualityElevated"])) considerFlag("air-quality");
   if (flags.size === 0) {
     considerFlag(reading["triggerReason"]);
   }
