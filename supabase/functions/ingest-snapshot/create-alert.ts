@@ -1,4 +1,5 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { pushRealtimeMessage } from "./realtime.ts";
 
 export type AlertKind = "AIR_QUALITY" | "TEMP_FEVER" | "DEVICE_OFFLINE";
 export type AlertSeverity = "INFO" | "WARN" | "CRIT";
@@ -34,9 +35,10 @@ export const createAlert = async (
     throw new Error("alerts-create returned an unexpected response");
   }
 
-  await supabase
-    .channel(`realtime:device:${deviceId}`)
-    .send({ type: "alert", payload: { id: alertId } });
+  await pushRealtimeMessage(supabase, `realtime:device:${auth.devId}`, {
+    type: "alert",
+    payload: { id: data.id },
+  });
 
   return alertId;
 };
