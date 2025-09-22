@@ -60,6 +60,31 @@ public:
     return true;
   }
 
+  // Enqueue a priority item by first clearing the queue, then pushing to the front.
+  // Used for alerts so they are delivered immediately.
+  bool enqueuePriority(const char* endpoint,
+                       std::vector<uint8_t>&& jpeg,
+                       const String& thermal,
+                       const String& reading) {
+    if (!_q || !endpoint) return false;
+
+    Serial.println("[upld] priority enqueue requested; clearing queue");
+    clearQueue();  // drop pending uploads; alert takes precedence
+
+    UploadItem* item = new UploadItem;
+    item->endpoint = String(endpoint);
+    item->jpeg = std::move(jpeg);
+    item->thermal = thermal;
+    item->reading = reading;
+    item->tsMs = millis();
+    if (xQueueSendToFront(_q, &item, 0) != pdTRUE) {
+      delete item;
+      return false;
+    }
+    return true;
+  }
+
+
 private:
   struct UploadItem {
     String endpoint;

@@ -4,17 +4,17 @@
 
 using namespace swt;
 
-const char* WIFI_SSID     = "scam ni";
-const char* WIFI_PASS     = "Walakokabalo0123!";
-const char* FN_BASE       = "https://tqhbmujdtqxqivaesydq.functions.supabase.co";
-const char* DEVICE_ID     = "798d7d0b-965c-4eff-ba65-ce081bc139eb";
+const char* WIFI_SSID = "scam ni";
+const char* WIFI_PASS = "Walakokabalo0123!";
+const char* FN_BASE = "https://tqhbmujdtqxqivaesydq.functions.supabase.co";
+const char* DEVICE_ID = "798d7d0b-965c-4eff-ba65-ce081bc139eb";
 const char* DEVICE_SECRET = "05d35d61907b85a1422636bc2518eea0e3e0e72342e32a2cba02505a313ed379";
 
-String   CAMERA_URL = "http://cam-pen1.local/capture?res=VGA";
+String CAMERA_URL = "http://cam-pen1.local/capture?res=VGA";
 uint32_t LIVE_FRAME_INTERVAL_MS = 1000;
-uint32_t READING_INTERVAL_MS    = 60000;
-float    OVERLAY_ALPHA          = 0.35;
-float    FEVER_C                = 39.5;
+uint32_t READING_INTERVAL_MS = 60000;
+float OVERLAY_ALPHA = 0.35;
+float FEVER_C = 39.5;
 
 Adafruit_BME680 bme;
 Adafruit_MLX90640 mlx;
@@ -64,7 +64,10 @@ void loop() {
     ensureWifiOrReboot(WIFI_SSID, WIFI_PASS, 10000);
     lastGuard = now;
   }
-  if (WiFi.status() != WL_CONNECTED) { delay(50); return; }
+  if (WiFi.status() != WL_CONNECTED) {
+    delay(50);
+    return;
+  }
 
   // Cached scalars / thermal summary
   static float lastTemp = 0, lastHum = 0, lastPress = 0, lastGas = 0, lastIAQ = 0;
@@ -75,14 +78,14 @@ void loop() {
     if (readBME680(bme, lastTemp, lastHum, lastPress, lastGas)) {
       lastIAQ = 0;
       readMLX90640(mlx, mlxFrame);
-      String _tmp = makeThermalSummaryJson(mlxFrame, tMin, tMax, tAvg); // just to refresh stats
+      String _tmp = makeThermalSummaryJson(mlxFrame, tMin, tMax, tAvg);  // just to refresh stats
       _tmp = String();
       lastReading = now;
     }
   }
 
   // Camera fetch backoff
-  static uint8_t  camFailCount = 0;
+  static uint8_t camFailCount = 0;
   static uint32_t camBackoffUntil = 0;
   if (camBackoffUntil && now < camBackoffUntil) {
     delay(10);
@@ -99,7 +102,8 @@ void loop() {
     if (camOk) {
       Serial.printf("[loop] camera fetch ok in %lums, size=%u (heap=%u)\n",
                     (unsigned long)fetchMs, (unsigned)jpeg.size(), ESP.getFreeHeap());
-      camFailCount = 0; camBackoffUntil = 0;
+      camFailCount = 0;
+      camBackoffUntil = 0;
 
       readMLX90640(mlx, mlxFrame);
       // String thJson = makeThermalSummaryJson(mlxFrame, tMin, tMax, tAvg);
@@ -111,7 +115,8 @@ void loop() {
       } else {
         Serial.println("[loop] live frame DROPPED (queue backpressure)");
       }
-      thJson = String(); rdJson = String();
+      thJson = String();
+      rdJson = String();
     } else {
       Serial.printf("[loop] camera fetch FAILED after %lums\n", (unsigned long)fetchMs);
       camFailCount = min<uint8_t>(camFailCount + 1, 6);
@@ -122,7 +127,9 @@ void loop() {
 
   // --- alert snapshot (full thermal grid), with cooldown ---
   static uint32_t alertCooldownUntil = 0;
-  if ((now >= alertCooldownUntil) && (isAirQualityElevated(lastGas, gasBaseline) || tMax > FEVER_C)) {
+  const bool airQualityElevated = isAirQualityElevated(lastGas, gasBaseline);
+  const bool feverDetected = tMax > FEVER_C;
+  if ((now >= alertCooldownUntil) && (airQualityElevated || feverDetected)) {
     std::vector<uint8_t> jpeg;
     if (swt::fetchCamera(CAMERA_URL, jpeg)) {
       readMLX90640(mlx, mlxFrame);
@@ -130,13 +137,20 @@ void loop() {
       String thJson = makeThermalJson(mlxFrame, _tMin, _tMax, _tAvg);
       String rdJson = makeReadingJson(lastTemp, lastHum, lastPress, lastGas, lastIAQ, _tMin, _tMax, _tAvg);
 
-      if (uploader.enqueue("/ingest-snapshot", std::move(jpeg), thJson, rdJson)) {
-        Serial.println("[loop] snapshot queued (alert)");
+      const char* triggerReason =
+        airQualityElevated && feverDetected ? "air+fever" : airQualityElevated ? "air"
+                                                          : feverDetected      ? "fever"
+                                                                               : "unknown";
+      if (uploader.enqueuePriority("/ingest-snapshot", std::move(jpeg), thJson, rdJson)) {
+        Serial.printf("[loop] snapshot queued (alert priority, reason=%s, gas=%.2f baseline=%.2f, prevMax=%.2f thresh=%.1f, newMax=%.2f)\n",
+                      triggerReason, lastGas, gasBaseline, tMax, FEVER_C, _tMax);
         alertCooldownUntil = now + 30000;
       } else {
-        Serial.println("[loop] snapshot enqueue FAILED");
+        Serial.printf("[loop] snapshot enqueue FAILED (alert priority, reason=%s, gas=%.2f baseline=%.2f, prevMax=%.2f thresh=%.1f, newMax=%.2f)\n",
+                      triggerReason, lastGas, gasBaseline, tMax, FEVER_C, _tMax);
       }
-      thJson = String(); rdJson = String();
+      thJson = String();
+      rdJson = String();
     }
   }
 
