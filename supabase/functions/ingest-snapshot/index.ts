@@ -3,17 +3,184 @@ import { verify } from "./_auth.ts"; // your HMAC verifier (SR key client)
 // Overlaying is now done on the device. We persist the thermal payload for
 // client-side composition.
 
+const encoder = new TextEncoder();
+
+const toHex = (buf: ArrayBufferLike) =>
+  Array.from(new Uint8Array(buf))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+
+const numberOrNull = (value: unknown) =>
+  typeof value === "number" && Number.isFinite(value) ? value : null;
+
+type AlertDraft = {
+  kind: string;
+  severity: string;
+  message: string;
+};
+
+const normalizeFlag = (flag: unknown) => {
+  if (typeof flag !== "string") return null;
+  const trimmed = flag.trim();
+  if (!trimmed) return null;
+  return trimmed
+    .replace(/([a-z])([A-Z])/g, "$1-$2")
+    .replace(/[^a-zA-Z0-9_-]/g, "-")
+    .replace(/-+/g, "-")
+    .toLowerCase();
+};
+
+const friendlyReason = (reason: string) =>
+  reason
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replace(/[_-]+/g, " ")
+    .trim();
+
+const alertMessageForKind = (
+  kind: string,
+  reading: Record<string, unknown>,
+): { severity: string; message: string } => {
+  const canonical = kind.replace(/_/g, "-");
+  if (canonical === "fever") {
+    const max =
+      numberOrNull(reading["tMax"]) ?? numberOrNull(reading["t_max"]) ??
+      numberOrNull(reading["tMaxC"]) ?? numberOrNull(reading["t_max_c"]);
+    const threshold =
+      numberOrNull(reading["feverThresholdC"]) ??
+      numberOrNull(reading["fever_threshold_c"]);
+    const delta =
+      numberOrNull(reading["feverDelta"]) ??
+      numberOrNull(reading["fever_delta"]);
+    const parts: string[] = [];
+    if (max != null) parts.push(`max ${max.toFixed(2)}°C`);
+    if (threshold != null) parts.push(`threshold ${threshold.toFixed(1)}°C`);
+    if (delta != null) parts.push(`Δ +${delta.toFixed(2)}°C`);
+    const suffix = parts.length ? ` (${parts.join(", ")})` : "";
+    return {
+      severity: "high",
+      message: `Fever detected${suffix}.`,
+    };
+  }
+
+  if (canonical === "air-quality") {
+    const iaq = numberOrNull(reading["iaq"]);
+    const gasRatio = numberOrNull(reading["gasRatio"]);
+    const metrics: string[] = [];
+    if (iaq != null) metrics.push(`IAQ ${iaq.toFixed(0)}`);
+    if (gasRatio != null) metrics.push(`gas ratio ${gasRatio.toFixed(2)}`);
+    const suffix = metrics.length ? ` (${metrics.join(", ")})` : "";
+    return {
+      severity: "medium",
+      message: `Air quality threshold exceeded${suffix}.`,
+    };
+  }
+
+  const rawReason = reading["triggerReason"];
+  const baseReason =
+    typeof rawReason === "string" && rawReason.trim().length > 0
+      ? rawReason
+      : kind;
+  const pretty = friendlyReason(baseReason);
+  return {
+    severity: "medium",
+    message: `Alert triggered (${pretty}).`,
+  };
+};
+
+const buildAlertsFromReading = (reading: Record<string, unknown>): AlertDraft[] => {
+  const flags = new Set<string>();
+  const rawFlags = Array.isArray(reading["triggerFlags"])
+    ? (reading["triggerFlags"] as unknown[])
+    : [];
+  for (const raw of rawFlags) {
+    const normalized = normalizeFlag(raw);
+    if (normalized) flags.add(normalized);
+  }
+  if (Boolean(reading["feverDetected"])) flags.add("fever");
+  if (Boolean(reading["airQualityElevated"])) flags.add("air-quality");
+  if (flags.size === 0) {
+    const normalizedReason = normalizeFlag(reading["triggerReason"]);
+    if (normalizedReason) flags.add(normalizedReason);
+  }
+
+  const alertDrafts: AlertDraft[] = [];
+  for (const kind of flags) {
+    const { severity, message } = alertMessageForKind(kind, reading);
+    alertDrafts.push({ kind, severity, message });
+  }
+  return alertDrafts;
+};
+
+const invokeAlertsCreate = async (
+  deviceId: string,
+  deviceSecret: string,
+  alert: AlertDraft,
+  readingId: number | null,
+) => {
+  const supabaseUrl = Deno.env.get("SUPABASE_URL");
+  if (!supabaseUrl) throw new Error("SUPABASE_URL is not configured");
+  const url = new URL("/functions/v1/alerts-create", supabaseUrl);
+  const body: Record<string, unknown> = {
+    kind: alert.kind,
+    severity: alert.severity,
+    message: alert.message,
+  };
+  if (readingId != null) body.reading_id = readingId;
+  const bodyJson = JSON.stringify(body);
+  const timestamp = Date.now().toString();
+  const bodyHash = await crypto.subtle.digest("SHA-256", encoder.encode(bodyJson));
+  const signatureBase = `POST\n${url.pathname}\n${toHex(bodyHash)}\n${timestamp}`;
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(deviceSecret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = toHex(
+    await crypto.subtle.sign("HMAC", key, encoder.encode(signatureBase)),
+  );
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Device-Id": deviceId,
+      "X-Timestamp": timestamp,
+      "X-Signature": signature,
+    },
+    body: bodyJson,
+  });
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => "");
+    throw new Error(`alerts-create failed (${response.status}): ${errorText}`);
+  }
+  const payload = (await response.json().catch(() => null)) as
+    | { id?: number }
+    | null;
+  if (!payload || typeof payload.id !== "number") {
+    throw new Error("alerts-create returned an unexpected response");
+  }
+  return payload.id;
+};
+
 Deno.serve(async (req) => {
   try {
     const auth = await verify(req);
     if (!auth.ok) return new Response(auth.msg, { status: auth.status });
 
     const supabase = auth.supabase as ReturnType<typeof createClient>;
+    const deviceSecret =
+      typeof (auth as { deviceSecret?: unknown }).deviceSecret === "string"
+        ? (auth as { deviceSecret: string }).deviceSecret
+        : "";
     const form = await req.clone().formData();
 
     const cam = form.get("cam") as File | null;
     const thermalFile = form.get("thermal") as File | null;
     const readingFile = form.get("reading") as File | null;
+
+    const thermalText = thermalFile ? await thermalFile.text() : null;
+    const readingText = readingFile ? await readingFile.text() : null;
 
     console.log(
       `ingest-snapshot: dev=${auth.devId} cam=${cam?.size ?? 0}B thermal=${
@@ -21,10 +188,21 @@ Deno.serve(async (req) => {
       }B reading=${readingFile?.size ?? 0}B`,
     );
     console.log(
-      `thermal: ${thermalFile ? await thermalFile.text() : "none"}, reading: ${
-        readingFile ? await readingFile.text() : "none"
-      }`,
+      `thermal: ${thermalText ?? "none"}, reading: ${readingText ?? "none"}`,
     );
+
+    let readingPayload: Record<string, unknown> | null = null;
+    if (readingText) {
+      try {
+        readingPayload = JSON.parse(readingText) as Record<string, unknown>;
+      } catch (err) {
+        console.error("snapshot: failed to parse reading payload:", err);
+      }
+    }
+    const alertsToCreate = readingPayload
+      ? buildAlertsFromReading(readingPayload)
+      : [];
+    const createdAlertIds: number[] = [];
 
     if (!cam) {
       return new Response(JSON.stringify({ error: "missing_cam" }), {
@@ -39,20 +217,19 @@ Deno.serve(async (req) => {
     // ---- optional: insert a reading row first (so we can link it)
     let readingId: number | null = null;
     try {
-      if (readingFile) {
-        const r = JSON.parse(await readingFile.text());
+      if (readingPayload) {
         const { data, error } = await supabase
           .from("readings")
           .insert({
             device_id: auth.devId,
-            temp_c: r.tempC,
-            humidity_rh: r.humidity,
-            pressure_hpa: r.pressure,
-            gas_res_ohm: r.gasRes,
-            iaq: r.iaq,
-            t_min_c: r.tMin,
-            t_max_c: r.tMax,
-            t_avg_c: r.tAvg,
+            temp_c: numberOrNull(readingPayload["tempC"]),
+            humidity_rh: numberOrNull(readingPayload["humidity"]),
+            pressure_hpa: numberOrNull(readingPayload["pressure"]),
+            gas_res_ohm: numberOrNull(readingPayload["gasRes"]),
+            iaq: numberOrNull(readingPayload["iaq"]),
+            t_min_c: numberOrNull(readingPayload["tMin"]),
+            t_max_c: numberOrNull(readingPayload["tMax"]),
+            t_avg_c: numberOrNull(readingPayload["tAvg"]),
           })
           .select("id")
           .single();
@@ -74,9 +251,8 @@ Deno.serve(async (req) => {
       cacheControl: "no-store",
     });
 
-    if (thermalFile) {
-      const thermalJson = await thermalFile.text();
-      await supabase.storage.from("snapshots").upload(`${auth.devId}/${stamp}.json`, thermalJson, {
+    if (thermalText != null) {
+      await supabase.storage.from("snapshots").upload(`${auth.devId}/${stamp}.json`, thermalText, {
         contentType: "application/json",
         upsert: false,
         cacheControl: "no-store",
@@ -116,6 +292,35 @@ Deno.serve(async (req) => {
       console.error("snapshot: table insert threw:", e);
     }
 
+    if (alertsToCreate.length > 0 && deviceSecret) {
+      for (const alert of alertsToCreate) {
+        try {
+          const alertId = await invokeAlertsCreate(
+            auth.devId,
+            deviceSecret,
+            alert,
+            readingId,
+          );
+          createdAlertIds.push(alertId);
+        } catch (err) {
+          console.error("snapshot: alert creation failed:", err);
+        }
+      }
+      if (snapshotId != null && createdAlertIds.length > 0) {
+        try {
+          await supabase
+            .from("snapshots")
+            .update({ alert_id: createdAlertIds[0] })
+            .eq("id", snapshotId);
+        } catch (err) {
+          console.error("snapshot: failed to link alert to snapshot:", err);
+        }
+      }
+    }
+    if (alertsToCreate.length > 0 && !deviceSecret) {
+      console.warn("snapshot: device secret missing; unable to create alerts");
+    }
+
     // ---- touch devices.last_seen (best effort)
     await supabase
       .from("devices")
@@ -129,6 +334,7 @@ Deno.serve(async (req) => {
         overlay_path: objectPath,
         contentType,
         readingId,
+        alertIds: createdAlertIds,
       }),
       { status: 200, headers: { "Content-Type": "application/json" } },
     );

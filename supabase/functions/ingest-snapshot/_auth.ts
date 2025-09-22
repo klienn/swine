@@ -55,5 +55,12 @@ export async function verify(req: Request) {
   // Optionally: size guard (reject > ~2.5MB bodies)
   // if (bodyBytes.byteLength > 2_500_000) return { ok:false, status:413, msg:"Payload too large" };
 
-  return { ok: true, status: 200, msg: "OK", devId: dev.id, supabase };
+  return {
+    ok: true,
+    status: 200,
+    msg: "OK",
+    devId: dev.id,
+    supabase,
+    deviceSecret: dev.secret,
+  };
 }
