@@ -35,9 +35,9 @@ export const createAlert = async (
     throw new Error("alerts-create returned an unexpected response");
   }
 
-  await pushRealtimeMessage(supabase, `realtime:device:${auth.devId}`, {
+  await pushRealtimeMessage(supabase, `realtime:device:${deviceId}`, {
     type: "alert",
-    payload: { id: data.id },
+    payload: { id: alertId },
   });
 
   return alertId;
