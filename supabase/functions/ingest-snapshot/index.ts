@@ -58,7 +58,7 @@ const alertMessageForKind = (
   kind: AlertKind,
   reading: Record<string, unknown>,
 ): { severity: AlertSeverity; message: string } => {
-  if (kind === AlertKind.TEMP_FEVER) {
+  if (kind === "TEMP_FEVER") {
     const max =
       numberOrNull(reading["tMax"]) ??
       numberOrNull(reading["t_max"]) ??
@@ -73,12 +73,12 @@ const alertMessageForKind = (
     if (delta != null) parts.push(`Δ +${delta.toFixed(2)}°C`);
     const suffix = parts.length ? ` (${parts.join(", ")})` : "";
     return {
-      severity: AlertSeverity.CRIT,
+      severity: "CRIT",
       message: `Fever detected${suffix}.`,
     };
   }
 
-  if (kind === AlertKind.AIR_QUALITY) {
+  if (kind === "AIR_QUALITY") {
     const iaq = numberOrNull(reading["iaq"]);
     const gasRatio = numberOrNull(reading["gasRatio"]);
     const metrics: string[] = [];
@@ -86,12 +86,12 @@ const alertMessageForKind = (
     if (gasRatio != null) metrics.push(`gas ratio ${gasRatio.toFixed(2)}`);
     const suffix = metrics.length ? ` (${metrics.join(", ")})` : "";
     return {
-      severity: AlertSeverity.WARN,
+      severity: "WARN",
       message: `Air quality threshold exceeded${suffix}.`,
     };
   }
 
-  if (kind === AlertKind.DEVICE_OFFLINE) {
+  if (kind === "DEVICE_OFFLINE") {
     const rawReason = reading["triggerReason"];
     const pretty =
       typeof rawReason === "string" && rawReason.trim().length > 0
@@ -99,12 +99,12 @@ const alertMessageForKind = (
         : "Device offline";
     const suffix = pretty && pretty.toLowerCase() !== "device offline" ? ` (${pretty})` : "";
     return {
-      severity: AlertSeverity.WARN,
+      severity: "WARN",
       message: `Device offline detected${suffix}.`,
     };
   }
   return {
-    severity: AlertSeverity.WARN,
+    severity: "WARN",
     message: `Alert triggered.`,
   };
 };
