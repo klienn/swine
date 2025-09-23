@@ -1,7 +1,18 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 type SupabaseChannel = ReturnType<SupabaseClient<any, any, any>["channel"]>;
-type ChannelSendArgs = { type: string; [key: string]: unknown };
+type BroadcastLikeArgs = {
+  type: "broadcast" | "presence" | "postgres_changes";
+  [key: string]: unknown;
+};
+
+type LegacyEventArgs = {
+  type: string;
+  payload?: unknown;
+  [key: string]: unknown;
+};
+
+type ChannelSendArgs = BroadcastLikeArgs | LegacyEventArgs;
 
 type PushOptions = {
   joinTimeoutMs?: number;
@@ -56,20 +67,52 @@ const joinChannel = (channel: SupabaseChannel, timeoutMs: number): Promise<void>
     });
   });
 
+const normalizeSendArgs = (payload: ChannelSendArgs) => {
+  if (
+    payload.type === "broadcast" ||
+    payload.type === "presence" ||
+    payload.type === "postgres_changes"
+  ) {
+    return payload;
+  }
+
+  const { type, payload: legacyPayload, ...rest } = payload;
+
+  let normalizedPayload: unknown = legacyPayload;
+  if (normalizedPayload === undefined) {
+    normalizedPayload = Object.keys(rest).length > 0 ? rest : null;
+  }
+
+  return {
+    type: "broadcast" as const,
+    event: type,
+    payload: normalizedPayload,
+  };
+};
+
 export const pushRealtimeMessage = async (
   supabase: SupabaseClient<any, any, any>,
   topic: string,
   payload: ChannelSendArgs,
   { joinTimeoutMs = DEFAULT_JOIN_TIMEOUT_MS }: PushOptions = {},
 ): Promise<void> => {
-  const channel = supabase.channel(topic);
+  const channel = supabase.channel(topic, {
+    config: {
+      broadcast: { ack: true },
+    },
+  });
 
   try {
     await joinChannel(channel, joinTimeoutMs);
-    const result = await channel.send(payload as any);
-    if (result !== "ok") {
-      throw new Error(`Realtime push to ${topic} failed with status "${result}"`);
+    const result = await channel.send(normalizeSendArgs(payload) as any);
+    if (result === "ok") {
+      return;
     }
+    if (result === "timed out") {
+      console.warn(`Realtime push to ${topic} timed out (no subscribers yet?)`);
+      return;
+    }
+    throw new Error(`Realtime push to ${topic} failed with status "${result}"`);
   } finally {
     try {
       await channel.unsubscribe();
