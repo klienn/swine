@@ -84,7 +84,11 @@ inline String makeThermalJson(const float* frame, float& tMin, float& tMax, floa
     json += String(frame[i], 2);
     if (i < 32 * 24 - 1) json += ",";
   }
-  json += "]}";
+  // add tMin, tMax, tAvg to JSON
+  json += "],\"tMin\":" + String(tMin, 2)
+       + ",\"tMax\":" + String(tMax, 2)
+       + ",\"tAvg\":" + String(tAvg, 2)
+       + "}";
   return json;
 }
 
