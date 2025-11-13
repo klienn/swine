@@ -1,6 +1,7 @@
 #include "swinetrack_http.h"
 #include "swinetrack_sensors.h"
 #include "async_http_uploader.h"
+#include "swinetrack_local_server.h"
 
 using namespace swt;
 
@@ -13,15 +14,17 @@ const char* DEVICE_SECRET = "05d35d61907b85a1422636bc2518eea0e3e0e72342e32a2cba0
 String CAMERA_URL = "http://cam-pen1.local/capture?res=VGA";
 uint32_t LIVE_FRAME_INTERVAL_MS = 1000;
 uint32_t READING_INTERVAL_MS = 60000;
+uint32_t REALTIME_THERMAL_INTERVAL_MS = 50;
 float OVERLAY_ALPHA = 0.35;
 float FEVER_C = 39.5;
+const uint16_t THERMAL_STREAM_PORT = 8787;
 
 Adafruit_BME680 bme;
 Adafruit_MLX90640 mlx;
 float mlxFrame[32 * 24];
 float gasBaseline = 0;
 
-uint32_t lastLive = 0, lastReading = 0;
+uint32_t lastLive = 0, lastReading = 0, lastRealtimeThermal = 0;
 
 // One background uploader for all endpoints
 AsyncUploader uploader(FN_BASE, DEVICE_ID, DEVICE_SECRET);
@@ -53,10 +56,20 @@ void setup() {
                 CAMERA_URL.c_str());
 
   uploader.begin(24576);
+  swt::startRealtimeThermalServer(THERMAL_STREAM_PORT);
 }
 
 void loop() {
   const uint32_t now = millis();
+  swt::serviceRealtimeThermalServer();
+
+  if (now - lastRealtimeThermal >= REALTIME_THERMAL_INTERVAL_MS) {
+    float rtMin = 0, rtMax = 0, rtAvg = 0;
+    readMLX90640(mlx, mlxFrame);
+    String realtimeJson = makeThermalJson(mlxFrame, rtMin, rtMax, rtAvg);
+    swt::publishRealtimeThermal(realtimeJson, rtMin, rtMax, rtAvg, swt::nowMs());
+    lastRealtimeThermal = now;
+  }
 
   // Wi-Fi guard
   static uint32_t lastGuard = 0;
@@ -108,6 +121,8 @@ void loop() {
       readMLX90640(mlx, mlxFrame);
       // String thJson = makeThermalSummaryJson(mlxFrame, tMin, tMax, tAvg);
       String thJson = makeThermalJson(mlxFrame, tMin, tMax, tAvg);
+      swt::publishRealtimeThermal(thJson, tMin, tMax, tAvg, swt::nowMs());
+      lastRealtimeThermal = now;
       String rdJson = makeReadingJson(lastTemp, lastHum, lastPress, lastGas, lastIAQ, tMin, tMax, tAvg);
 
       if (uploader.enqueue("/ingest-live-frame", std::move(jpeg), thJson, rdJson)) {
@@ -135,6 +150,8 @@ void loop() {
       readMLX90640(mlx, mlxFrame);
       float _tMin, _tMax, _tAvg;
       String thJson = makeThermalJson(mlxFrame, _tMin, _tMax, _tAvg);
+      swt::publishRealtimeThermal(thJson, _tMin, _tMax, _tAvg, swt::nowMs());
+      lastRealtimeThermal = now;
       const bool feverNow = _tMax > FEVER_C;
       const bool feverObserved = feverAtTrigger || feverNow;
       const char* triggerReason = airQualityElevated && feverObserved
