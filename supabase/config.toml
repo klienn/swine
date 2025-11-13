@@ -336,6 +336,9 @@ s3_secret_key = "env(S3_SECRET_KEY)"
 [functions.ingest-live-frame]
 verify_jwt = false
 
+[functions.ingest-live-thermal]
+verify_jwt = false
+
 [functions.ingest-snapshot]
 verify_jwt = false
 
