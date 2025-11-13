@@ -10,6 +10,8 @@ const char* WIFI_PASS = "Walakokabalo0123!";
 const char* FN_BASE = "https://tqhbmujdtqxqivaesydq.functions.supabase.co";
 const char* DEVICE_ID = "798d7d0b-965c-4eff-ba65-ce081bc139eb";
 const char* DEVICE_SECRET = "05d35d61907b85a1422636bc2518eea0e3e0e72342e32a2cba02505a313ed379";
+const char* LIVE_CAMERA_ENDPOINT = "/ingest-live-frame";
+const char* LIVE_THERMAL_ENDPOINT = "/ingest-live-thermal";
 
 String CAMERA_URL = "http://cam-pen1.local/capture?res=VGA";
 uint32_t LIVE_FRAME_INTERVAL_MS = 1000;
@@ -101,43 +103,50 @@ void loop() {
   // Camera fetch backoff
   static uint8_t camFailCount = 0;
   static uint32_t camBackoffUntil = 0;
-  if (camBackoffUntil && now < camBackoffUntil) {
-    delay(10);
-    return;
-  }
 
   // --- near-live frame push (summary thermal; full grid NOT needed) ---
   if (now - lastLive >= LIVE_FRAME_INTERVAL_MS) {
-    std::vector<uint8_t> jpeg;
-    uint32_t tFetch0 = millis();
-    bool camOk = swt::fetchCamera(CAMERA_URL, jpeg);
-    uint32_t fetchMs = millis() - tFetch0;
+    float liveTMin = 0, liveTMax = 0, liveTAvg = 0;
+    readMLX90640(mlx, mlxFrame);
+    String thJson = makeThermalJson(mlxFrame, liveTMin, liveTMax, liveTAvg);
+    swt::publishRealtimeThermal(thJson, liveTMin, liveTMax, liveTAvg, swt::nowMs());
+    lastRealtimeThermal = now;
+    String rdJson = makeReadingJson(lastTemp, lastHum, lastPress, lastGas, lastIAQ,
+                                    liveTMin, liveTMax, liveTAvg);
 
-    if (camOk) {
-      Serial.printf("[loop] camera fetch ok in %lums, size=%u (heap=%u)\n",
-                    (unsigned long)fetchMs, (unsigned)jpeg.size(), ESP.getFreeHeap());
-      camFailCount = 0;
-      camBackoffUntil = 0;
-
-      readMLX90640(mlx, mlxFrame);
-      // String thJson = makeThermalSummaryJson(mlxFrame, tMin, tMax, tAvg);
-      String thJson = makeThermalJson(mlxFrame, tMin, tMax, tAvg);
-      swt::publishRealtimeThermal(thJson, tMin, tMax, tAvg, swt::nowMs());
-      lastRealtimeThermal = now;
-      String rdJson = makeReadingJson(lastTemp, lastHum, lastPress, lastGas, lastIAQ, tMin, tMax, tAvg);
-
-      if (uploader.enqueue("/ingest-live-frame", std::move(jpeg), thJson, rdJson)) {
-        Serial.printf("[loop] live frame enqueued @ %lu ms\n", (unsigned long)now);
-      } else {
-        Serial.println("[loop] live frame DROPPED (queue backpressure)");
-      }
-      thJson = String();
-      rdJson = String();
+    if (uploader.enqueue(LIVE_THERMAL_ENDPOINT, std::vector<uint8_t>(), thJson, rdJson)) {
+      Serial.printf("[loop] thermal sample enqueued @ %lu ms\n", (unsigned long)now);
     } else {
-      Serial.printf("[loop] camera fetch FAILED after %lums\n", (unsigned long)fetchMs);
-      camFailCount = min<uint8_t>(camFailCount + 1, 6);
-      camBackoffUntil = now + (1000UL << camFailCount);
+      Serial.println("[loop] thermal sample DROPPED (queue backpressure)");
     }
+
+    const bool cameraAllowed = (camBackoffUntil == 0) || (now >= camBackoffUntil);
+    if (cameraAllowed) {
+      std::vector<uint8_t> jpeg;
+      uint32_t tFetch0 = millis();
+      bool camOk = swt::fetchCamera(CAMERA_URL, jpeg);
+      uint32_t fetchMs = millis() - tFetch0;
+
+      if (camOk) {
+        Serial.printf("[loop] camera fetch ok in %lums, size=%u (heap=%u)\n",
+                      (unsigned long)fetchMs, (unsigned)jpeg.size(), ESP.getFreeHeap());
+        camFailCount = 0;
+        camBackoffUntil = 0;
+
+        if (uploader.enqueue(LIVE_CAMERA_ENDPOINT, std::move(jpeg), thJson, rdJson)) {
+          Serial.printf("[loop] live frame enqueued @ %lu ms\n", (unsigned long)now);
+        } else {
+          Serial.println("[loop] live frame DROPPED (queue backpressure)");
+        }
+      } else {
+        Serial.printf("[loop] camera fetch FAILED after %lums\n", (unsigned long)fetchMs);
+        camFailCount = min<uint8_t>(camFailCount + 1, 6);
+        camBackoffUntil = now + (1000UL << camFailCount);
+      }
+    }
+
+    thJson = String();
+    rdJson = String();
     lastLive = now;
   }
 

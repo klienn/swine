@@ -150,30 +150,81 @@ private:
 
   // --- Minimal-allocation HTTPS POST (HTTP/1.0 + close; stream parts directly) ---
   int sendRawTLS(const UploadItem& it) {
-    // Build multipart boundaries/strings (small)
-    const String boundary = "----swt_" + String(millis());
-
-    const String head =
-      "--" + boundary + "\r\n"
-                        "Content-Disposition: form-data; name=\"cam\"; filename=\"cam.jpg\"\r\n"
-                        "Content-Type: image/jpeg\r\n\r\n";
-
-    String mid =
-      "\r\n--" + boundary + "\r\n"
-                            "Content-Disposition: form-data; name=\"thermal\"; filename=\"thermal.json\"\r\n"
-                            "Content-Type: application/json\r\n\r\n"
-      + it.thermal + "\r\n";
-
-    String tail;
-    if (it.reading.length()) {
-      tail += "--" + boundary + "\r\n"
-                                "Content-Disposition: form-data; name=\"reading\"; filename=\"reading.json\"\r\n"
-                                "Content-Type: application/json\r\n\r\n"
-              + it.reading + "\r\n";
+    const bool hasCam = !it.jpeg.empty();
+    const bool hasThermal = it.thermal.length() > 0;
+    const bool hasReading = it.reading.length() > 0;
+    if (!hasCam && !hasThermal && !hasReading) {
+      Serial.printf("[upld] nothing to send for endpoint %s\n", it.endpoint.c_str());
+      return -1;
     }
-    tail += "--" + boundary + "--\r\n";
 
-    // Pre-compute HMAC over the exact multipart bytes (head + jpeg + mid + tail)
+    struct PartDesc {
+      enum Kind { Cam, Thermal, Reading } kind;
+      String header;
+      size_t payloadLen = 0;
+    };
+
+    const String boundary = "----swt_" + String(millis());
+    auto makeHeader = [&](const char* name, const char* filename, const char* contentType) {
+      String h;
+      h.reserve(128);
+      h += "--";
+      h += boundary;
+      h += "\r\nContent-Disposition: form-data; name=\"";
+      h += name;
+      h += "\"";
+      if (filename && filename[0]) {
+        h += "; filename=\"";
+        h += filename;
+        h += "\"";
+      }
+      h += "\r\nContent-Type: ";
+      h += contentType;
+      h += "\r\n\r\n";
+      return h;
+    };
+
+    std::vector<PartDesc> parts;
+    parts.reserve((hasCam ? 1 : 0) + (hasThermal ? 1 : 0) + (hasReading ? 1 : 0));
+
+    if (hasCam) {
+      PartDesc p;
+      p.kind = PartDesc::Cam;
+      p.header = makeHeader("cam", "cam.jpg", "image/jpeg");
+      p.payloadLen = it.jpeg.size();
+      parts.push_back(std::move(p));
+    }
+    if (hasThermal) {
+      PartDesc p;
+      p.kind = PartDesc::Thermal;
+      p.header = makeHeader("thermal", "thermal.json", "application/json");
+      p.payloadLen = it.thermal.length();
+      parts.push_back(std::move(p));
+    }
+    if (hasReading) {
+      PartDesc p;
+      p.kind = PartDesc::Reading;
+      p.header = makeHeader("reading", "reading.json", "application/json");
+      p.payloadLen = it.reading.length();
+      parts.push_back(std::move(p));
+    }
+
+    if (parts.empty()) {
+      Serial.printf("[upld] no multipart sections built for %s\n", it.endpoint.c_str());
+      return -1;
+    }
+
+    const char* kCrlf = "\r\n";
+    constexpr size_t kCrlfLen = 2;
+    const String closing = String("--") + boundary + "--\r\n";
+    size_t contentLen = closing.length();
+    for (const auto& p : parts) {
+      contentLen += p.header.length();
+      contentLen += p.payloadLen;
+      contentLen += kCrlfLen;  // CRLF after each part payload
+    }
+
+    // Pre-compute HMAC over the exact multipart bytes
     String bodyHash;
     {
       mbedtls_md_context_t ctx;
@@ -181,10 +232,23 @@ private:
       const mbedtls_md_info_t* info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
       mbedtls_md_setup(&ctx, info, 0);
       mbedtls_md_starts(&ctx);
-      mbedtls_md_update(&ctx, (const unsigned char*)head.c_str(), head.length());
-      if (!it.jpeg.empty()) mbedtls_md_update(&ctx, it.jpeg.data(), it.jpeg.size());
-      mbedtls_md_update(&ctx, (const unsigned char*)mid.c_str(), mid.length());
-      mbedtls_md_update(&ctx, (const unsigned char*)tail.c_str(), tail.length());
+
+      for (const auto& p : parts) {
+        mbedtls_md_update(&ctx, (const unsigned char*)p.header.c_str(), p.header.length());
+        switch (p.kind) {
+          case PartDesc::Cam:
+            if (!it.jpeg.empty()) mbedtls_md_update(&ctx, it.jpeg.data(), it.jpeg.size());
+            break;
+          case PartDesc::Thermal:
+            mbedtls_md_update(&ctx, (const unsigned char*)it.thermal.c_str(), it.thermal.length());
+            break;
+          case PartDesc::Reading:
+            mbedtls_md_update(&ctx, (const unsigned char*)it.reading.c_str(), it.reading.length());
+            break;
+        }
+        mbedtls_md_update(&ctx, (const unsigned char*)kCrlf, kCrlfLen);
+      }
+      mbedtls_md_update(&ctx, (const unsigned char*)closing.c_str(), closing.length());
       uint8_t out[32];
       mbedtls_md_finish(&ctx, out);
       mbedtls_md_free(&ctx);
@@ -195,8 +259,6 @@ private:
     const String path = _basePath + it.endpoint;
     const String base = "POST\n" + path + "\n" + bodyHash + "\n" + ts;
     const String sig = hmacSha256Hex(_deviceSecret, base);
-
-    const size_t contentLen = head.length() + it.jpeg.size() + mid.length() + tail.length();
 
     WiFiClientSecure c;
 #ifdef SWT_DEV_INSECURE
@@ -224,19 +286,33 @@ private:
     c.printf("X-Signature: %s\r\n\r\n", sig.c_str());
 
     // Stream the body in parts (no giant buffer)
-    if (!_writeAll(c, (const uint8_t*)head.c_str(), head.length())) {
-      c.stop();
-      return -1;
+    for (const auto& p : parts) {
+      if (!_writeAll(c, (const uint8_t*)p.header.c_str(), p.header.length())) {
+        c.stop();
+        return -1;
+      }
+      bool ok = true;
+      switch (p.kind) {
+        case PartDesc::Cam:
+          if (!it.jpeg.empty()) ok = _writeAll(c, it.jpeg.data(), it.jpeg.size());
+          break;
+        case PartDesc::Thermal:
+          ok = _writeAll(c, (const uint8_t*)it.thermal.c_str(), it.thermal.length());
+          break;
+        case PartDesc::Reading:
+          ok = _writeAll(c, (const uint8_t*)it.reading.c_str(), it.reading.length());
+          break;
+      }
+      if (!ok) {
+        c.stop();
+        return -1;
+      }
+      if (!_writeAll(c, (const uint8_t*)kCrlf, kCrlfLen)) {
+        c.stop();
+        return -1;
+      }
     }
-    if (!it.jpeg.empty() && !_writeAll(c, it.jpeg.data(), it.jpeg.size())) {
-      c.stop();
-      return -1;
-    }
-    if (!_writeAll(c, (const uint8_t*)mid.c_str(), mid.length())) {
-      c.stop();
-      return -1;
-    }
-    if (!_writeAll(c, (const uint8_t*)tail.c_str(), tail.length())) {
+    if (!_writeAll(c, (const uint8_t*)closing.c_str(), closing.length())) {
       c.stop();
       return -1;
     }
