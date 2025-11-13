@@ -14,6 +14,7 @@ const char* DEVICE_SECRET = "05d35d61907b85a1422636bc2518eea0e3e0e72342e32a2cba0
 String CAMERA_URL = "http://cam-pen1.local/capture?res=VGA";
 uint32_t LIVE_FRAME_INTERVAL_MS = 1000;
 uint32_t READING_INTERVAL_MS = 60000;
+const uint32_t SNAPSHOT_COOLDOWN_MS = 5UL * 60UL * 1000UL;
 uint32_t REALTIME_THERMAL_INTERVAL_MS = 50;
 float OVERLAY_ALPHA = 0.35;
 float FEVER_C = 39.5;
@@ -166,7 +167,7 @@ void loop() {
       if (uploader.enqueuePriority("/ingest-snapshot", std::move(jpeg), thJson, rdJson)) {
         Serial.printf("[loop] snapshot queued (alert priority, reason=%s, gas=%.2f baseline=%.2f, prevMax=%.2f thresh=%.1f, newMax=%.2f)\n",
                       triggerReason, lastGas, gasBaseline, tMax, FEVER_C, _tMax);
-        alertCooldownUntil = now + 30000;
+        alertCooldownUntil = now + SNAPSHOT_COOLDOWN_MS;
       } else {
         Serial.printf("[loop] snapshot enqueue FAILED (alert priority, reason=%s, gas=%.2f baseline=%.2f, prevMax=%.2f thresh=%.1f, newMax=%.2f)\n",
                       triggerReason, lastGas, gasBaseline, tMax, FEVER_C, _tMax);
