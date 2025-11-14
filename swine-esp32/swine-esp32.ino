@@ -15,7 +15,7 @@ const char* LIVE_THERMAL_ENDPOINT = "/ingest-live-thermal";
 
 String CAMERA_URL = "http://cam-pen1.local/capture?res=VGA";
 uint32_t LIVE_FRAME_INTERVAL_MS = 1000;
-uint32_t READING_INTERVAL_MS = 60000;
+uint32_t READING_INTERVAL_MS = 180000;
 const uint32_t SNAPSHOT_COOLDOWN_MS = 5UL * 60UL * 1000UL;
 uint32_t REALTIME_THERMAL_INTERVAL_MS = 50;
 float OVERLAY_ALPHA = 0.35;
