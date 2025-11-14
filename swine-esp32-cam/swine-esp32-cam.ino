@@ -9,8 +9,8 @@
 // ===========================
 // Enter your WiFi credentials
 // ===========================
-const char *ssid = "scam ni";
-const char *password = "Walakokabalo0123!";
+const char *ssid = "MERCUSYS_0D8A";
+const char *password = "22854186";
 
 void startCameraServer();
 void setupLedFlash();

@@ -5,8 +5,8 @@
 
 using namespace swt;
 
-const char* WIFI_SSID = "scam ni";
-const char* WIFI_PASS = "Walakokabalo0123!";
+const char* WIFI_SSID = "MERCUSYS_0D8A";
+const char* WIFI_PASS = "22854186";
 const char* FN_BASE = "https://tqhbmujdtqxqivaesydq.functions.supabase.co";
 const char* DEVICE_ID = "798d7d0b-965c-4eff-ba65-ce081bc139eb";
 const char* DEVICE_SECRET = "05d35d61907b85a1422636bc2518eea0e3e0e72342e32a2cba02505a313ed379";
@@ -40,6 +40,7 @@ void setup() {
   WiFi.setSleep(false);
   WiFi.persistent(false);
   WiFi.setAutoReconnect(true);
+  WiFi.setHostname("esp32main");
 
   ensureWifiOrReboot(WIFI_SSID, WIFI_PASS, 20000);
   syncTime();
