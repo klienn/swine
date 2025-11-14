@@ -15,14 +15,20 @@
 namespace swt {
 
 // ---------- Time helpers ----------
-inline void syncTime() {
+inline bool syncTime(uint32_t timeoutMs = 15000) {
   configTime(0, 0, "pool.ntp.org", "time.nist.gov");
   time_t now = time(nullptr);
-  while (now < 1700000000) {
+  const uint32_t t0 = millis();
+  while (now < 1700000000 && (millis() - t0) < timeoutMs) {
     delay(200);
     now = time(nullptr);
   }
-  Serial.printf("Time synced: %ld\n", (long)now);
+  if (now >= 1700000000) {
+    Serial.printf("Time synced: %ld\n", (long)now);
+    return true;
+  }
+  Serial.println("[time] sync failed (offline?)");
+  return false;
 }
 inline uint64_t nowMs() {
   return (uint64_t)time(nullptr) * 1000ULL;

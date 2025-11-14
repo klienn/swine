@@ -28,6 +28,12 @@ float mlxFrame[32 * 24];
 float gasBaseline = 0;
 
 uint32_t lastLive = 0, lastReading = 0, lastRealtimeThermal = 0;
+bool gCloudOnline = false;
+bool gConfigFetched = false;
+uint32_t gLastTimeSyncAttemptMs = 0;
+uint32_t gLastConfigAttemptMs = 0;
+const uint32_t CLOUD_SYNC_RETRY_MS = 60000;
+const uint32_t CONFIG_FETCH_RETRY_MS = 120000;
 
 // One background uploader for all endpoints
 AsyncUploader uploader(FN_BASE, DEVICE_ID, DEVICE_SECRET);
@@ -43,16 +49,29 @@ void setup() {
   WiFi.setHostname("esp32main");
 
   ensureWifiOrReboot(WIFI_SSID, WIFI_PASS, 20000);
-  syncTime();
+  gLastTimeSyncAttemptMs = millis();
+  gCloudOnline = syncTime(20000);
+  if (!gCloudOnline) {
+    Serial.println("[setup] time sync failed; running in local-only mode");
+  }
 
   initI2CBus(21, 22, 100000);
   initBME680(bme);
   initMLX90640(mlx);
   setI2CClock(400000);
 
-  fetchConfig(FN_BASE, DEVICE_ID, DEVICE_SECRET,
-              CAMERA_URL, LIVE_FRAME_INTERVAL_MS, READING_INTERVAL_MS,
-              OVERLAY_ALPHA, FEVER_C);
+  if (gCloudOnline) {
+    Serial.println("[setup] fetching remote config...");
+    gLastConfigAttemptMs = millis();
+    gConfigFetched = fetchConfig(FN_BASE, DEVICE_ID, DEVICE_SECRET,
+                                 CAMERA_URL, LIVE_FRAME_INTERVAL_MS, READING_INTERVAL_MS,
+                                 OVERLAY_ALPHA, FEVER_C);
+    if (!gConfigFetched) {
+      Serial.println("[setup] config fetch failed; keeping defaults");
+    }
+  } else {
+    Serial.println("[setup] skipping remote config fetch (offline)");
+  }
 
   Serial.printf("FN_BASE: '%s'\n", FN_BASE);
   Serial.printf("Config: live=%lums read=%lums alpha=%.2f fever=%.1f cam=%s\n",
@@ -79,6 +98,28 @@ void loop() {
   static uint32_t lastGuard = 0;
   if (now - lastGuard >= 10000) {
     ensureWifiOrReboot(WIFI_SSID, WIFI_PASS, 10000);
+    if (WiFi.status() == WL_CONNECTED) {
+      if (!gCloudOnline && (now - gLastTimeSyncAttemptMs) >= CLOUD_SYNC_RETRY_MS) {
+        Serial.println("[net] retrying time sync...");
+        gLastTimeSyncAttemptMs = now;
+        gCloudOnline = syncTime(5000);
+        if (gCloudOnline) {
+          Serial.println("[net] time sync restored; enabling cloud features");
+          gConfigFetched = false;  // force config refresh
+        }
+      }
+      if (gCloudOnline && !gConfigFetched &&
+          (now - gLastConfigAttemptMs) >= CONFIG_FETCH_RETRY_MS) {
+        Serial.println("[net] fetching remote config...");
+        gLastConfigAttemptMs = now;
+        gConfigFetched = fetchConfig(FN_BASE, DEVICE_ID, DEVICE_SECRET,
+                                     CAMERA_URL, LIVE_FRAME_INTERVAL_MS, READING_INTERVAL_MS,
+                                     OVERLAY_ALPHA, FEVER_C);
+        if (!gConfigFetched) {
+          Serial.println("[net] config fetch failed; will retry");
+        }
+      }
+    }
     lastGuard = now;
   }
   if (WiFi.status() != WL_CONNECTED) {
@@ -112,42 +153,45 @@ void loop() {
     String thJson = makeThermalJson(mlxFrame, liveTMin, liveTMax, liveTAvg);
     swt::publishRealtimeThermal(thJson, liveTMin, liveTMax, liveTAvg, swt::nowMs());
     lastRealtimeThermal = now;
-    String rdJson = makeReadingJson(lastTemp, lastHum, lastPress, lastGas, lastIAQ,
-                                    liveTMin, liveTMax, liveTAvg);
+    if (gCloudOnline) {
+      String rdJson = makeReadingJson(lastTemp, lastHum, lastPress, lastGas, lastIAQ,
+                                      liveTMin, liveTMax, liveTAvg);
 
-    if (uploader.enqueue(LIVE_THERMAL_ENDPOINT, std::vector<uint8_t>(), thJson, rdJson)) {
-      Serial.printf("[loop] thermal sample enqueued @ %lu ms\n", (unsigned long)now);
-    } else {
-      Serial.println("[loop] thermal sample DROPPED (queue backpressure)");
-    }
-
-    const bool cameraAllowed = (camBackoffUntil == 0) || (now >= camBackoffUntil);
-    if (cameraAllowed) {
-      std::vector<uint8_t> jpeg;
-      uint32_t tFetch0 = millis();
-      bool camOk = swt::fetchCamera(CAMERA_URL, jpeg);
-      uint32_t fetchMs = millis() - tFetch0;
-
-      if (camOk) {
-        Serial.printf("[loop] camera fetch ok in %lums, size=%u (heap=%u)\n",
-                      (unsigned long)fetchMs, (unsigned)jpeg.size(), ESP.getFreeHeap());
-        camFailCount = 0;
-        camBackoffUntil = 0;
-
-        if (uploader.enqueue(LIVE_CAMERA_ENDPOINT, std::move(jpeg), thJson, rdJson)) {
-          Serial.printf("[loop] live frame enqueued @ %lu ms\n", (unsigned long)now);
-        } else {
-          Serial.println("[loop] live frame DROPPED (queue backpressure)");
-        }
+      if (uploader.enqueue(LIVE_THERMAL_ENDPOINT, std::vector<uint8_t>(), thJson, rdJson)) {
+        Serial.printf("[loop] thermal sample enqueued @ %lu ms\n", (unsigned long)now);
       } else {
-        Serial.printf("[loop] camera fetch FAILED after %lums\n", (unsigned long)fetchMs);
-        camFailCount = min<uint8_t>(camFailCount + 1, 6);
-        camBackoffUntil = now + (1000UL << camFailCount);
+        Serial.println("[loop] thermal sample DROPPED (queue backpressure)");
       }
+
+      const bool cameraAllowed = (camBackoffUntil == 0) || (now >= camBackoffUntil);
+      if (cameraAllowed) {
+        std::vector<uint8_t> jpeg;
+        uint32_t tFetch0 = millis();
+        bool camOk = swt::fetchCamera(CAMERA_URL, jpeg);
+        uint32_t fetchMs = millis() - tFetch0;
+
+        if (camOk) {
+          Serial.printf("[loop] camera fetch ok in %lums, size=%u (heap=%u)\n",
+                        (unsigned long)fetchMs, (unsigned)jpeg.size(), ESP.getFreeHeap());
+          camFailCount = 0;
+          camBackoffUntil = 0;
+
+          if (uploader.enqueue(LIVE_CAMERA_ENDPOINT, std::move(jpeg), thJson, rdJson)) {
+            Serial.printf("[loop] live frame enqueued @ %lu ms\n", (unsigned long)now);
+          } else {
+            Serial.println("[loop] live frame DROPPED (queue backpressure)");
+          }
+        } else {
+          Serial.printf("[loop] camera fetch FAILED after %lums\n", (unsigned long)fetchMs);
+          camFailCount = min<uint8_t>(camFailCount + 1, 6);
+          camBackoffUntil = now + (1000UL << camFailCount);
+        }
+      }
+
+      rdJson = String();
     }
 
     thJson = String();
-    rdJson = String();
     lastLive = now;
   }
 
@@ -155,7 +199,7 @@ void loop() {
   static uint32_t alertCooldownUntil = 0;
   const bool airQualityElevated = isAirQualityElevated(lastGas, gasBaseline);
   const bool feverAtTrigger = tMax > FEVER_C;
-  if ((now >= alertCooldownUntil) && (airQualityElevated || feverAtTrigger)) {
+  if (gCloudOnline && (now >= alertCooldownUntil) && (airQualityElevated || feverAtTrigger)) {
     std::vector<uint8_t> jpeg;
     if (swt::fetchCamera(CAMERA_URL, jpeg)) {
       readMLX90640(mlx, mlxFrame);
