@@ -22,6 +22,25 @@ float OVERLAY_ALPHA = 0.35;
 float FEVER_C = 39.5;
 const uint16_t THERMAL_STREAM_PORT = 8787;
 
+struct ThermalViewState {
+  bool valid;
+  float tMin;
+  float tMax;
+  float tAvg;
+  uint64_t capturedAtMs;
+};
+
+static ThermalViewState gLatestThermalView = {false, 0.0f, 0.0f, 0.0f, 0};
+
+static inline void recordLatestThermalView(float tMin, float tMax, float tAvg,
+                                          uint64_t capturedAtMs) {
+  gLatestThermalView.valid = true;
+  gLatestThermalView.tMin = tMin;
+  gLatestThermalView.tMax = tMax;
+  gLatestThermalView.tAvg = tAvg;
+  gLatestThermalView.capturedAtMs = capturedAtMs;
+}
+
 Adafruit_BME680 bme;
 Adafruit_MLX90640 mlx;
 float mlxFrame[32 * 24];
@@ -90,7 +109,9 @@ void loop() {
     float rtMin = 0, rtMax = 0, rtAvg = 0;
     readMLX90640(mlx, mlxFrame);
     String realtimeJson = makeThermalJson(mlxFrame, rtMin, rtMax, rtAvg);
-    swt::publishRealtimeThermal(realtimeJson, rtMin, rtMax, rtAvg, swt::nowMs());
+    const uint64_t realtimeCapturedAt = swt::nowMs();
+    swt::publishRealtimeThermal(realtimeJson, rtMin, rtMax, rtAvg, realtimeCapturedAt);
+    recordLatestThermalView(rtMin, rtMax, rtAvg, realtimeCapturedAt);
     lastRealtimeThermal = now;
   }
 
@@ -151,7 +172,9 @@ void loop() {
     float liveTMin = 0, liveTMax = 0, liveTAvg = 0;
     readMLX90640(mlx, mlxFrame);
     String thJson = makeThermalJson(mlxFrame, liveTMin, liveTMax, liveTAvg);
-    swt::publishRealtimeThermal(thJson, liveTMin, liveTMax, liveTAvg, swt::nowMs());
+    const uint64_t liveCapturedAt = swt::nowMs();
+    swt::publishRealtimeThermal(thJson, liveTMin, liveTMax, liveTAvg, liveCapturedAt);
+    recordLatestThermalView(liveTMin, liveTMax, liveTAvg, liveCapturedAt);
     lastRealtimeThermal = now;
     if (gCloudOnline) {
       String rdJson = makeReadingJson(lastTemp, lastHum, lastPress, lastGas, lastIAQ,
@@ -198,14 +221,17 @@ void loop() {
   // --- alert snapshot (full thermal grid), with cooldown ---
   static uint32_t alertCooldownUntil = 0;
   const bool airQualityElevated = isAirQualityElevated(lastGas, gasBaseline);
-  const bool feverAtTrigger = tMax > FEVER_C;
+  const float recentThermalMax = gLatestThermalView.valid ? gLatestThermalView.tMax : tMax;
+  const bool feverAtTrigger = recentThermalMax > FEVER_C;
   if (gCloudOnline && (now >= alertCooldownUntil) && (airQualityElevated || feverAtTrigger)) {
     std::vector<uint8_t> jpeg;
     if (swt::fetchCamera(CAMERA_URL, jpeg)) {
       readMLX90640(mlx, mlxFrame);
       float _tMin, _tMax, _tAvg;
       String thJson = makeThermalJson(mlxFrame, _tMin, _tMax, _tAvg);
-      swt::publishRealtimeThermal(thJson, _tMin, _tMax, _tAvg, swt::nowMs());
+      const uint64_t snapshotCapturedAt = swt::nowMs();
+      swt::publishRealtimeThermal(thJson, _tMin, _tMax, _tAvg, snapshotCapturedAt);
+      recordLatestThermalView(_tMin, _tMax, _tAvg, snapshotCapturedAt);
       lastRealtimeThermal = now;
       const bool feverNow = _tMax > FEVER_C;
       const bool feverObserved = feverAtTrigger || feverNow;
@@ -215,16 +241,16 @@ void loop() {
                                   : feverObserved      ? "fever"
                                                        : "unknown";
       String rdJson = makeAlertContextJson(lastTemp, lastHum, lastPress, lastGas, lastIAQ,
-                                           _tMin, _tMax, _tAvg, tMax, gasBaseline, FEVER_C,
+                                           _tMin, _tMax, _tAvg, recentThermalMax, gasBaseline, FEVER_C,
                                            airQualityElevated, feverNow, feverAtTrigger,
-                                           triggerReason, lastReading, swt::nowMs(), now);
+                                           triggerReason, lastReading, snapshotCapturedAt, now);
       if (uploader.enqueuePriority("/ingest-snapshot", std::move(jpeg), thJson, rdJson)) {
         Serial.printf("[loop] snapshot queued (alert priority, reason=%s, gas=%.2f baseline=%.2f, prevMax=%.2f thresh=%.1f, newMax=%.2f)\n",
-                      triggerReason, lastGas, gasBaseline, tMax, FEVER_C, _tMax);
+                      triggerReason, lastGas, gasBaseline, recentThermalMax, FEVER_C, _tMax);
         alertCooldownUntil = now + SNAPSHOT_COOLDOWN_MS;
       } else {
         Serial.printf("[loop] snapshot enqueue FAILED (alert priority, reason=%s, gas=%.2f baseline=%.2f, prevMax=%.2f thresh=%.1f, newMax=%.2f)\n",
-                      triggerReason, lastGas, gasBaseline, tMax, FEVER_C, _tMax);
+                      triggerReason, lastGas, gasBaseline, recentThermalMax, FEVER_C, _tMax);
       }
       thJson = String();
       rdJson = String();
