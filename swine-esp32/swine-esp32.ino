@@ -220,10 +220,20 @@ void loop() {
 
   // --- alert snapshot (full thermal grid), with cooldown ---
   static uint32_t alertCooldownUntil = 0;
+  static uint32_t lastSnapshotAtMs = 0;
+  static bool snapshotTimersInitialized = false;
+  if (!snapshotTimersInitialized) {
+    lastSnapshotAtMs = now;
+    alertCooldownUntil = now;
+    snapshotTimersInitialized = true;
+  }
   const bool airQualityElevated = isAirQualityElevated(lastGas, gasBaseline);
   const float recentThermalMax = gLatestThermalView.valid ? gLatestThermalView.tMax : tMax;
   const bool feverAtTrigger = recentThermalMax > FEVER_C;
-  if (gCloudOnline && (now >= alertCooldownUntil) && (airQualityElevated || feverAtTrigger)) {
+  const bool cooldownExpired = now >= alertCooldownUntil;
+  const bool detectionTriggered = airQualityElevated || feverAtTrigger;
+  const bool periodicDue = cooldownExpired && ((now - lastSnapshotAtMs) >= SNAPSHOT_COOLDOWN_MS);
+  if (gCloudOnline && cooldownExpired && (detectionTriggered || periodicDue)) {
     std::vector<uint8_t> jpeg;
     if (swt::fetchCamera(CAMERA_URL, jpeg)) {
       readMLX90640(mlx, mlxFrame);
@@ -235,11 +245,14 @@ void loop() {
       lastRealtimeThermal = now;
       const bool feverNow = _tMax > FEVER_C;
       const bool feverObserved = feverAtTrigger || feverNow;
-      const char* triggerReason = airQualityElevated && feverObserved
-                                    ? "air+fever"
-                                  : airQualityElevated ? "air"
-                                  : feverObserved      ? "fever"
-                                                       : "unknown";
+      const bool triggeredByPeriodicOnly = periodicDue && !detectionTriggered;
+      const char* triggerReason = triggeredByPeriodicOnly
+                                    ? "periodic"
+                                  : airQualityElevated && feverObserved
+                                      ? "air+fever"
+                                    : airQualityElevated ? "air"
+                                    : feverObserved      ? "fever"
+                                                         : "unknown";
       String rdJson = makeAlertContextJson(lastTemp, lastHum, lastPress, lastGas, lastIAQ,
                                            _tMin, _tMax, _tAvg, recentThermalMax, gasBaseline, FEVER_C,
                                            airQualityElevated, feverNow, feverAtTrigger,
@@ -248,6 +261,7 @@ void loop() {
         Serial.printf("[loop] snapshot queued (alert priority, reason=%s, gas=%.2f baseline=%.2f, prevMax=%.2f thresh=%.1f, newMax=%.2f)\n",
                       triggerReason, lastGas, gasBaseline, recentThermalMax, FEVER_C, _tMax);
         alertCooldownUntil = now + SNAPSHOT_COOLDOWN_MS;
+        lastSnapshotAtMs = now;
       } else {
         Serial.printf("[loop] snapshot enqueue FAILED (alert priority, reason=%s, gas=%.2f baseline=%.2f, prevMax=%.2f thresh=%.1f, newMax=%.2f)\n",
                       triggerReason, lastGas, gasBaseline, recentThermalMax, FEVER_C, _tMax);
